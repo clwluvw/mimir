@@ -171,6 +171,15 @@ api:
   # CLI flag: -http.response-compression-level
   [response_compression_level: <int> | default = -1]
 
+  # (experimental) External labels to report via the Prometheus HTTP API
+  # status/config endpoint, as a JSON map of label name to label value, e.g.
+  # {"cluster":"prod","replica":"mimir"}. This does not add labels to query
+  # results or affect ingestion; it only allows tools that discover external
+  # labels via the Prometheus HTTP API, such as a Thanos sidecar pointed at
+  # Mimir, to see them.
+  # CLI flag: -api.prometheus-external-labels
+  [prometheus_external_labels: <map of string to string> | default = {}]
+
 # The server block configures the HTTP and gRPC server of the launched
 # service(s).
 [server: <server>]

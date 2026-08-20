@@ -322,6 +322,7 @@ The following features are currently experimental:
 - Jsonnet
   - `$._config.autoscaling_oom_protection_enabled` controls whether to add extra KEDA ScaledObject trigger to prevent from down-scaling during OOM kills, if memory trigger is disabled
 - Configuring the gzip compression level used for compressed HTTP responses with `-http.response-compression-level`.
+- Reporting static external labels via the Prometheus HTTP API `/api/v1/status/config` endpoint with `-api.prometheus-external-labels`.
 
 ## Deprecated features
 

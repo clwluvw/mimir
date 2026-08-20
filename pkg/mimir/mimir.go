@@ -426,7 +426,7 @@ func (c *Config) Validate(log log.Logger) error {
 	if err := c.InstrumentRefLeaks.Validate(); err != nil {
 		return errors.Wrap(err, "invalid instrument-ref-leaks config")
 	}
-	if err := c.API.Validate(); err != nil {
+	if err := c.API.Validate(c.LimitsConfig); err != nil {
 		return errors.Wrap(err, "invalid API config")
 	}
 

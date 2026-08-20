@@ -121,6 +121,8 @@ Usage of ./cmd/mimir/mimir:
     	Directory to store Alertmanager state and temporarily configuration files. The content of this directory is not required to be persisted between restarts unless Alertmanager replication has been disabled. (default "./data-alertmanager/")
   -alertmanager.web.external-url string
     	The URL under which Alertmanager is externally reachable (eg. could be different than -http.alertmanager-http-prefix in case Alertmanager is served via a reverse proxy). This setting is used both to configure the internal requests router and to generate links in alert templates. If the external URL has a path portion, it will be used to prefix all HTTP endpoints served by Alertmanager, both the UI and API. (default http://localhost:8080/alertmanager)
+  -api.prometheus-external-labels value
+    	External labels to report via the Prometheus HTTP API status/config endpoint, as a JSON map of label name to label value, e.g. {"cluster":"prod","replica":"mimir"}. This does not add labels to query results or affect ingestion; it only allows tools that discover external labels via the Prometheus HTTP API, such as a Thanos sidecar pointed at Mimir, to see them. (default {})
   -auth.multitenancy-enabled
     	When set to true, incoming HTTP requests must specify tenant ID in HTTP X-Scope-OrgId header. When set to false, tenant ID from -auth.no-auth-tenant is used instead. (default true)
   -blocks-storage.azure.account-key string

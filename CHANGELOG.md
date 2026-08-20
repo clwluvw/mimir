@@ -16,6 +16,7 @@
 * [BUGFIX] Ingest storage: Account for protobuf framing when splitting Remote Write 1.0 requests so generated Kafka record data stays within `-ingest-storage.kafka.producer-max-record-size-bytes` when individual series and metadata entries fit. #16160
 * [BUGFIX] Memcached: Don't close connections to caches on well-formed server errors. #16303
 * [FEATURE] Ruler: Add experimental per-tenant `external_labels` and `alert_relabel_configs` options to `ruler_alertmanager_client_config`. External labels are added to alerts sent to Alertmanager (matching Prometheus, only when the alert does not already define a label with the same name) and are made available to alerting rule templates; alert relabel configs are applied to alerts before they are sent to Alertmanager and can rewrite or drop them. #15972
+* [FEATURE] API: Add the experimental `-api.prometheus-external-labels` flag to report static external labels via the Prometheus HTTP API `/api/v1/status/config` endpoint, so a Thanos sidecar pointed at Mimir's Prometheus-compatible API can discover external labels the same way it would for a real Prometheus. #16502
 
 ### Mixin
 

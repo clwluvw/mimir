@@ -26,7 +26,6 @@ import (
 	"github.com/prometheus/client_golang/prometheus"
 	dto "github.com/prometheus/client_model/go"
 	"github.com/prometheus/common/route"
-	"github.com/prometheus/prometheus/config"
 	"github.com/prometheus/prometheus/promql"
 	"github.com/prometheus/prometheus/storage"
 	v1 "github.com/prometheus/prometheus/web/api/v1"
@@ -246,7 +245,7 @@ func NewQuerierHandler(
 		func(context.Context) v1.ScrapePoolsRetriever { return &querier.DummyTargetRetriever{} },
 		func(context.Context) v1.TargetRetriever { return &querier.DummyTargetRetriever{} },
 		func(context.Context) v1.AlertmanagerRetriever { return &querier.DummyAlertmanagerRetriever{} },
-		func() config.Config { return config.Config{} },
+		cfg.prometheusConfig,
 		map[string]string{}, // TODO: include configuration flags
 		v1.GlobalURLOptions{},
 		func(f http.HandlerFunc) http.HandlerFunc { return f },

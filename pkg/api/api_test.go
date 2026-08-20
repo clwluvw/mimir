@@ -8,6 +8,8 @@ package api
 import (
 	"bytes"
 	"compress/gzip"
+	"encoding/json"
+	"flag"
 	"fmt"
 	"io"
 	"net"
@@ -25,6 +27,8 @@ import (
 	"github.com/grafana/dskit/ring"
 	"github.com/grafana/dskit/server"
 	"github.com/prometheus/client_golang/prometheus"
+	"github.com/prometheus/common/model"
+	"github.com/prometheus/prometheus/model/labels"
 	"github.com/stretchr/testify/require"
 
 	"github.com/grafana/mimir/pkg/ingester"
@@ -32,12 +36,120 @@ import (
 	"github.com/grafana/mimir/pkg/storage/ingest"
 	"github.com/grafana/mimir/pkg/util/activitytracker"
 	"github.com/grafana/mimir/pkg/util/gziphandler"
+	"github.com/grafana/mimir/pkg/util/validation"
 )
 
 type FakeLogger struct{}
 
 func (fl *FakeLogger) Log(...interface{}) error {
 	return nil
+}
+
+func TestConfig_PrometheusExternalLabels(t *testing.T) {
+	t.Run("registers external labels from CLI flag", func(t *testing.T) {
+		cfg := Config{}
+		fs := flag.NewFlagSet("test", flag.ContinueOnError)
+		cfg.RegisterFlags(fs)
+
+		require.NoError(t, fs.Parse([]string{`-api.prometheus-external-labels={"cluster":"prod","replica":"mimir"}`}))
+
+		require.Equal(t, labels.FromStrings("cluster", "prod", "replica", "mimir"), cfg.prometheusConfig().GlobalConfig.ExternalLabels)
+	})
+
+	t.Run("defaults to no external labels", func(t *testing.T) {
+		cfg := Config{}
+		fs := flag.NewFlagSet("test", flag.ContinueOnError)
+		cfg.RegisterFlags(fs)
+
+		require.True(t, cfg.prometheusConfig().GlobalConfig.ExternalLabels.IsEmpty())
+	})
+
+}
+
+func TestValidateExternalLabelValue(t *testing.T) {
+	require.NoError(t, validateExternalLabelValue("cluster", "prod"))
+	// Label names are not checked here: the name validation scheme isn't known while flags are
+	// still being parsed, so Config.Validate does it instead.
+	require.NoError(t, validateExternalLabelValue("0invalid", "prod"))
+	require.Error(t, validateExternalLabelValue("cluster", string([]byte{0xff})))
+}
+
+// Label names must be validated against the configured name validation scheme, the same way
+// validation.Limits.Validate does for the ruler's per-tenant external labels. Otherwise a
+// utf8-scheme cluster can set ruler_alertmanager_client_config.external_labels to a dotted name
+// but not prometheus_external_labels, which would make Mimir refuse to start.
+func TestConfig_Validate_ExternalLabelNames(t *testing.T) {
+	for _, tc := range []struct {
+		name        string
+		scheme      model.ValidationScheme
+		labelName   string
+		expectedErr bool
+	}{
+		{name: "legacy scheme accepts a legacy name", scheme: model.LegacyValidation, labelName: "cluster"},
+		{name: "legacy scheme rejects a dotted name", scheme: model.LegacyValidation, labelName: "service.name", expectedErr: true},
+		{name: "utf8 scheme accepts a dotted name", scheme: model.UTF8Validation, labelName: "service.name"},
+		{name: "unset scheme falls back to legacy", scheme: model.UnsetValidation, labelName: "service.name", expectedErr: true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			cfg := Config{}
+			fs := flag.NewFlagSet("test", flag.ContinueOnError)
+			cfg.RegisterFlags(fs)
+			require.NoError(t, fs.Parse([]string{fmt.Sprintf(`-api.prometheus-external-labels={%q:"x"}`, tc.labelName)}))
+
+			limits := validation.Limits{NameValidationScheme: tc.scheme}
+			err := cfg.Validate(limits)
+			if tc.expectedErr {
+				require.ErrorContains(t, err, "is not a valid label name")
+			} else {
+				require.NoError(t, err)
+			}
+		})
+	}
+}
+
+// The point of the feature is that the endpoint is reachable at the Prometheus prefix (i.e. on
+// the query-frontend, which only forwards an allowlist of /prometheus/api/v1/* paths) and that
+// the body matches the shape Prometheus itself returns.
+func TestStatusConfigAPIEndpointServesExternalLabels(t *testing.T) {
+	cfg := Config{}
+	fs := flag.NewFlagSet("test", flag.ContinueOnError)
+	cfg.RegisterFlags(fs)
+	require.NoError(t, fs.Parse([]string{`-api.prometheus-external-labels={"dc":"frw1"}`}))
+
+	serverCfg := getServerConfig(t)
+	serverCfg.MetricsNamespace = "status_config_endpoint"
+	srv, err := server.New(serverCfg)
+	require.NoError(t, err)
+	go func() { _ = srv.Run() }()
+	t.Cleanup(srv.Stop)
+
+	api, err := New(cfg, tenantfederation.Config{}, serverCfg, srv, log.NewNopLogger(), nil)
+	require.NoError(t, err)
+
+	notImplemented := http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.WriteHeader(http.StatusNotImplemented)
+	})
+	api.RegisterQueryAPI(notImplemented, notImplemented, 0)
+
+	u := fmt.Sprintf("http://%s:%d%s/api/v1/status/config", serverCfg.HTTPListenAddress, serverCfg.HTTPListenPort, cfg.PrometheusHTTPPrefix)
+	res, err := http.Get(u)
+	require.NoError(t, err)
+	t.Cleanup(func() { _ = res.Body.Close() })
+	require.Equal(t, http.StatusOK, res.StatusCode)
+
+	body, err := io.ReadAll(res.Body)
+	require.NoError(t, err)
+
+	var got struct {
+		Status string `json:"status"`
+		Data   struct {
+			YAML string `json:"yaml"`
+		} `json:"data"`
+	}
+	require.NoError(t, json.Unmarshal(body, &got))
+	require.Equal(t, "success", got.Status)
+	require.Contains(t, got.Data.YAML, "external_labels:")
+	require.Contains(t, got.Data.YAML, "dc: frw1")
 }
 
 func TestNewApiWithoutSourceIPExtractor(t *testing.T) {

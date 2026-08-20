@@ -373,6 +373,8 @@ Usage of ./cmd/mimir/mimir:
     	The URL under which Alertmanager is externally reachable (eg. could be different than -http.alertmanager-http-prefix in case Alertmanager is served via a reverse proxy). This setting is used both to configure the internal requests router and to generate links in alert templates. If the external URL has a path portion, it will be used to prefix all HTTP endpoints served by Alertmanager, both the UI and API. (default http://localhost:8080/alertmanager)
   -api.otlp-translation-headers-enabled
     	[experimental] Allows controlling OTLP metric name suffix addition and translation strategy via X-Mimir-OTLP-AddSuffixes and X-Mimir-OTLP-TranslationStrategy headers on the OTLP push path. Not recommended for general use.
+  -api.prometheus-external-labels value
+    	External labels to report via the Prometheus HTTP API status/config endpoint, as a JSON map of label name to label value, e.g. {"cluster":"prod","replica":"mimir"}. This does not add labels to query results or affect ingestion; it only allows tools that discover external labels via the Prometheus HTTP API, such as a Thanos sidecar pointed at Mimir, to see them. (default {})
   -api.skip-label-count-validation-header-enabled
     	Allows to disable enforcement of the label count limit "max_label_names_per_series" via X-Mimir-SkipLabelCountValidation header on the http write path. Allowing this for external clients allows any client to send invalid label counts. After enabling it, requests with a specific HTTP header set to true will not have label counts validated.
   -api.skip-label-name-validation-header-enabled

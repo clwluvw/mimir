@@ -18,6 +18,7 @@ import (
 	"github.com/go-kit/log"
 	"github.com/go-kit/log/level"
 	"github.com/gorilla/mux"
+	"github.com/grafana/dskit/flagext"
 	"github.com/grafana/dskit/kv"
 	"github.com/grafana/dskit/kv/memberlist"
 	dskitlog "github.com/grafana/dskit/log"
@@ -26,6 +27,9 @@ import (
 	"github.com/grafana/dskit/server"
 	"github.com/prometheus/client_golang/prometheus"
 	"github.com/prometheus/client_golang/prometheus/promhttp"
+	"github.com/prometheus/common/model"
+	"github.com/prometheus/prometheus/config"
+	"github.com/prometheus/prometheus/model/labels"
 
 	"github.com/grafana/mimir/pkg/alertmanager"
 	"github.com/grafana/mimir/pkg/alertmanager/alertmanagerpb"
@@ -70,6 +74,11 @@ type Config struct {
 
 	GzipCompressionLevel int `yaml:"response_compression_level" category:"experimental"`
 
+	// PrometheusExternalLabels are exposed via the Prometheus HTTP API status/config endpoint
+	// so that tools which discover external labels that way (e.g. a Thanos sidecar pointed at
+	// Mimir's Prometheus-compatible API) see the same external labels as a real Prometheus.
+	PrometheusExternalLabels flagext.LimitsMap[string] `yaml:"prometheus_external_labels" category:"experimental"`
+
 	// The following configs are injected by the upstream caller.
 	ServerPrefix       string               `yaml:"-"`
 	HTTPAuthMiddleware middleware.Interface `yaml:"-"`
@@ -86,7 +95,47 @@ func (cfg *Config) RegisterFlags(f *flag.FlagSet) {
 	f.BoolVar(&cfg.SkipLabelNameValidationHeader, "api.skip-label-name-validation-header-enabled", false, "Allows to skip label name validation via X-Mimir-SkipLabelNameValidation header on the http write path. Use with caution as it breaks PromQL. Allowing this for external clients allows any client to send invalid label names. After enabling it, requests with a specific HTTP header set to true will not have label names validated.")
 	f.BoolVar(&cfg.SkipLabelCountValidationHeader, "api.skip-label-count-validation-header-enabled", false, "Allows to disable enforcement of the label count limit \"max_label_names_per_series\" via X-Mimir-SkipLabelCountValidation header on the http write path. Allowing this for external clients allows any client to send invalid label counts. After enabling it, requests with a specific HTTP header set to true will not have label counts validated.")
 	f.BoolVar(&cfg.OTLPTranslationHeaders, "api.otlp-translation-headers-enabled", false, "Allows controlling OTLP metric name suffix addition and translation strategy via X-Mimir-OTLP-AddSuffixes and X-Mimir-OTLP-TranslationStrategy headers on the OTLP push path. Not recommended for general use.")
+	cfg.PrometheusExternalLabels = flagext.NewLimitsMap[string](validateExternalLabelValue)
+	f.Var(&cfg.PrometheusExternalLabels, "api.prometheus-external-labels", "External labels to report via the Prometheus HTTP API status/config endpoint, as a JSON map of label name to label value, e.g. {\"cluster\":\"prod\",\"replica\":\"mimir\"}. This does not add labels to query results or affect ingestion; it only allows tools that discover external labels via the Prometheus HTTP API, such as a Thanos sidecar pointed at Mimir, to see them.")
 	cfg.RegisterFlagsWithPrefix("", f)
+}
+
+// prometheusConfig builds the config.Config reported by the Prometheus HTTP API's
+// /api/v1/status/config endpoint, exposing PrometheusExternalLabels as global.external_labels
+// so that tools which discover external labels that way (e.g. a Thanos sidecar pointed at
+// Mimir's Prometheus-compatible API) see the same external labels as a real Prometheus.
+func (cfg Config) prometheusConfig() config.Config {
+	return config.Config{GlobalConfig: config.GlobalConfig{ExternalLabels: labels.FromMap(cfg.PrometheusExternalLabels.Read())}}
+}
+
+// statusConfigAPIHandler serves /api/v1/status/config on the query-frontend and querier alike,
+// matching the shape Prometheus's own v1.API.serveConfig returns. It's self-contained (needs
+// only the static PrometheusExternalLabels config, no live queryable) so, unlike most of the
+// Prometheus HTTP API, it doesn't need to be proxied from the query-frontend to a querier.
+func (cfg Config) statusConfigAPIHandler() http.HandlerFunc {
+	return func(w http.ResponseWriter, _ *http.Request) {
+		util.WriteJSONResponse(w, struct {
+			Status string `json:"status"`
+			Data   struct {
+				YAML string `json:"yaml"`
+			} `json:"data"`
+		}{
+			Status: "success",
+			Data: struct {
+				YAML string `json:"yaml"`
+			}{YAML: cfg.prometheusConfig().String()},
+		})
+	}
+}
+
+// validateExternalLabelValue checks only the label value, which is scheme-independent. Label
+// names need the configured name validation scheme, which isn't known while flags are still
+// being parsed, so they're checked later in Validate instead.
+func validateExternalLabelValue(_, value string) error {
+	if !model.LabelValue(value).IsValid() {
+		return fmt.Errorf("%q is not a valid label value", value)
+	}
+	return nil
 }
 
 // RegisterFlagsWithPrefix adds the flags required to config this to the given FlagSet with the set prefix.
@@ -96,9 +145,26 @@ func (cfg *Config) RegisterFlagsWithPrefix(prefix string, f *flag.FlagSet) {
 	f.IntVar(&cfg.GzipCompressionLevel, prefix+"http.response-compression-level", gzip.DefaultCompression, fmt.Sprintf("Compression level for HTTP responses when gzip compression is requested by the client. Valid values are 1 (fastest) to 9 (best compression), or %d for the default compression level.", gzip.DefaultCompression))
 }
 
-func (cfg *Config) Validate() error {
+func (cfg *Config) Validate(limits validation.Limits) error {
 	if (cfg.GzipCompressionLevel < 1 || cfg.GzipCompressionLevel > 9) && cfg.GzipCompressionLevel != gzip.DefaultCompression {
 		return fmt.Errorf("invalid gzip compression level: %d, must be between 1 and 9 or %d for default compression level", cfg.GzipCompressionLevel, gzip.DefaultCompression)
+	}
+
+	// Validate the external label names against the configured name validation scheme, the same
+	// way validation.Limits.Validate does for the ruler's per-tenant external labels. This can't
+	// happen in the flag validator: the scheme isn't known while flags are still being parsed.
+	validationScheme := model.LegacyValidation
+	switch limits.NameValidationScheme {
+	case model.UTF8Validation, model.LegacyValidation:
+		validationScheme = limits.NameValidationScheme
+	default:
+		// Unset or unrecognized; validation.Limits.Validate reports the latter, so fall back to
+		// the same default it uses rather than failing twice with different messages.
+	}
+	for name := range cfg.PrometheusExternalLabels.Read() {
+		if !validationScheme.IsValidLabelName(name) {
+			return fmt.Errorf("invalid prometheus_external_labels: %q is not a valid label name", name)
+		}
 	}
 
 	return nil
@@ -518,6 +584,7 @@ func (a *API) RegisterQueryAPI(handler http.Handler, buildInfoHandler http.Handl
 	a.RegisterRouteWithMaxBodySize(path.Join(a.cfg.PrometheusHTTPPrefix, "/api/v1/label/{name}/values"), handler, true, true, maxBodySizeIfAny, "GET")
 	a.RegisterRouteWithMaxBodySize(path.Join(a.cfg.PrometheusHTTPPrefix, "/api/v1/series"), handler, true, true, maxBodySizeIfAny, "GET", "POST", "DELETE")
 	a.RegisterRouteWithMaxBodySize(path.Join(a.cfg.PrometheusHTTPPrefix, "/api/v1/status/buildinfo"), buildInfoHandler, false, true, maxBodySizeIfAny, "GET")
+	a.RegisterRouteWithMaxBodySize(path.Join(a.cfg.PrometheusHTTPPrefix, "/api/v1/status/config"), a.cfg.statusConfigAPIHandler(), false, true, maxBodySizeIfAny, "GET")
 	a.RegisterRouteWithMaxBodySize(path.Join(a.cfg.PrometheusHTTPPrefix, "/api/v1/metadata"), handler, true, true, maxBodySizeIfAny, "GET")
 	a.RegisterRouteWithMaxBodySize(path.Join(a.cfg.PrometheusHTTPPrefix, "/api/v1/cardinality/label_names"), handler, true, true, maxBodySizeIfAny, "GET", "POST")
 	a.RegisterRouteWithMaxBodySize(path.Join(a.cfg.PrometheusHTTPPrefix, "/api/v1/cardinality/label_values"), handler, true, true, maxBodySizeIfAny, "GET", "POST")
